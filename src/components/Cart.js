@@ -1,5 +1,5 @@
 import React from "react";
-import "./Cart.css";
+import "../styles.css";
 
 function Cart({ cart }) {
   const total = cart.reduce((sum, item) => sum + item.price, 0);
