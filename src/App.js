@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import ProductList from "./components/ProductList";
 import Cart from "./components/Cart";
-import "./App.css";
+import "./styles.css";
 
 function App() {
   const [cart, setCart] = useState([]);
