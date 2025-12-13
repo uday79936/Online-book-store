@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import ProductList from "./components/ProductList";
 import Cart from "./components/Cart";
+import "./App.css";
 
 function App() {
   const [cart, setCart] = useState([]);
@@ -10,10 +11,13 @@ function App() {
   };
 
   return (
-    <div className="container">
-      <h1>🛒 Online Store</h1>
-      <ProductList addToCart={addToCart} />
-      <Cart cart={cart} />
+    <div className="app">
+      <h1 className="title">🛒 Online Store</h1>
+
+      <div className="content">
+        <ProductList addToCart={addToCart} />
+        <Cart cart={cart} />
+      </div>
     </div>
   );
 }
