@@ -1,5 +1,4 @@
-import React from "react";
-import "./ProductList.css";
+import "../styles.css";
 
 const products = [
   { id: 1, name: "Laptop", price: 55000 },
