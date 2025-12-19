@@ -7,17 +7,33 @@ function App() {
   const [cart, setCart] = useState([]);
 
   const addToCart = (product) => {
-    setCart([...cart, product]);
+    setCart((prev) => [...prev, product]);
   };
 
   return (
     <div className="app">
-      <h1 className="title">🛒 Online Store</h1>
+      {/* Header */}
+      <header className="header">
+        <h1>
+          🛒 <span>Online Store</span>
+        </h1>
 
-      <div className="content">
+        {/* Cart Count Badge */}
+        <div className="cart-status">
+          Items in Cart: <strong>{cart.length}</strong>
+        </div>
+      </header>
+
+      {/* Main App */}
+      <main className="content">
         <ProductList addToCart={addToCart} />
         <Cart cart={cart} />
-      </div>
+      </main>
+
+      {/* Footer */}
+      <footer className="footer">
+        <p>Powered by React ⚡ | Designed for a vibrant shopping experience</p>
+      </footer>
     </div>
   );
 }
