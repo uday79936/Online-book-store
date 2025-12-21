@@ -15,6 +15,7 @@ pipeline {
         NEXUS_ARTIFACT  = 'online-book-store'
 
         NGINX_WEB_ROOT  = '/var/www/html'
+        NGINX_SERVER_IP = '18.223.44.159'
     }
 
     options {
@@ -24,7 +25,6 @@ pipeline {
 
     stages {
 
-        /* --- Stage 1: Source Checkout --- */
         stage('Checkout Code') {
             steps {
                 echo "📦 Fetching repository..."
@@ -41,10 +41,9 @@ pipeline {
             }
         }
 
-        /* --- Stage 2: Install Dependencies --- */
         stage('Install Dependencies') {
             steps {
-                echo '📥 Installing npm dependencies...'
+                echo '📥 Installing dependencies...'
 
                 sh '''
                     npm config set fund false
@@ -55,7 +54,6 @@ pipeline {
             }
         }
 
-        /* --- Stage 3: Unit Testing --- */
         stage('Unit Tests + Coverage') {
             steps {
                 echo '🧪 Running tests...'
@@ -68,7 +66,6 @@ pipeline {
             }
         }
 
-        /* --- Stage 4: Sonar Analysis --- */
         stage('SonarQube Analysis') {
             steps {
                 script {
@@ -101,7 +98,6 @@ pipeline {
             }
         }
 
-        /* --- Stage 5: Build Application --- */
         stage('Build Artifact') {
             steps {
                 echo '⚙️ Building production app...'
@@ -119,7 +115,6 @@ pipeline {
             }
         }
 
-        /* --- Stage 6: Package Artifact --- */
         stage('Package Artifact') {
             steps {
                 echo "📦 Creating deployment package..."
@@ -135,7 +130,6 @@ pipeline {
             }
         }
 
-        /* --- Stage 7: Upload to Nexus --- */
         stage('Upload Artifact to Nexus') {
             steps {
 
@@ -154,62 +148,80 @@ pipeline {
                         TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
                         FILE_PATH="${TARBALL}"
 
-                        if [ ! -f "${FILE_PATH}" ]; then
-                            echo "❌ Tarball missing!" 
-                            exit 1
-                        fi
-
                         UPLOAD_URL="${NEXUS_URL}/repository/${NEXUS_REPO}/${TARBALL}"
 
-                        curl -v -u "${NEXUS_USR}:${NEXUS_PSW}" \
+                        curl -f -u "${NEXUS_USR}:${NEXUS_PSW}" \
                         --upload-file "${FILE_PATH}" "${UPLOAD_URL}"
-
-                        echo "✔ Artifact uploaded!"
                     '''
+
+                    echo "✔ Artifact uploaded!"
                 }
             }
         }
 
-        /* --- Stage 8: Deploy to Nginx --- */
         stage('Deploy to Nginx') {
             steps {
 
-                echo "🚀 Deploying application to NGINX web root..."
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'nexus',
+                        usernameVariable: 'NEXUS_USR',
+                        passwordVariable: 'NEXUS_PSW'
+                    ),
+                    sshUserPrivateKey(
+                        credentialsId: 'nginx-ssh',
+                        keyFileVariable: 'SSH_KEY'
+                    )
+                ]) {
 
-                sh '''
-                    VERSION="0.0.${BUILD_NUMBER}"
-                    TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
-                    DOWNLOAD_URL="${NEXUS_URL}/repository/${NEXUS_REPO}/${TARBALL}"
-                    WEB_ROOT="${NGINX_WEB_ROOT}"
+                    echo "⬇️ Download artifact to Jenkins..."
 
-                    echo "⬇️ Downloading: ${TARBALL}"
-                    curl -f -o "/tmp/${TARBALL}" "${DOWNLOAD_URL}"
+                    sh '''
+                        VERSION="0.0.${BUILD_NUMBER}"
+                        TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
+                        DOWNLOAD_URL="${NEXUS_URL}/repository/${NEXUS_REPO}/${TARBALL}"
 
-                    if [ ! -f "/tmp/${TARBALL}" ]; then
-                        echo "❌ Download failed!"
-                        exit 1
-                    fi
+                        curl -f -u "${NEXUS_USR}:${NEXUS_PSW}" \
+                        -o "/tmp/${TARBALL}" "${DOWNLOAD_URL}"
+                    '''
 
-                    mkdir -p "${WEB_ROOT}"
-                    rm -rf "${WEB_ROOT:?}/"*
+                    echo "📤 Transfer artifact to nginx server..."
 
-                    echo "📦 Extracting into web root..."
-                    tar -xzf "/tmp/${TARBALL}" -C "${WEB_ROOT}"
+                    sh '''
+                        VERSION="0.0.${BUILD_NUMBER}"
+                        TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
 
-                    chmod -R 755 "${WEB_ROOT}"
+                        scp -o StrictHostKeyChecking=no -i $SSH_KEY \
+                        /tmp/${TARBALL} \
+                        ubuntu@${NGINX_SERVER_IP}:/tmp/${TARBALL}
+                    '''
+
+                    echo "🚀 Deploying on nginx..."
+
+                    sh '''
+                        VERSION="0.0.${BUILD_NUMBER}"
+                        TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
+                        WEB_ROOT="${NGINX_WEB_ROOT}"
+
+                        ssh -o StrictHostKeyChecking=no -i $SSH_KEY ubuntu@${NGINX_SERVER_IP} \
+                        "sudo rm -rf ${WEB_ROOT:?}/* && \
+                         sudo mkdir -p ${WEB_ROOT} && \
+                         sudo tar -xzf /tmp/${TARBALL} -C ${WEB_ROOT} && \
+                         sudo rm -f /tmp/${TARBALL} && \
+                         sudo chmod -R 755 ${WEB_ROOT} && \
+                         sudo systemctl restart nginx"
+                    '''
 
                     echo "✔ Deployment completed!"
-                '''
+                }
             }
         }
     }
 
     post {
-
         success {
             echo '🎉 Pipeline completed successfully!'
         }
-
         failure {
             echo '❌ Pipeline failed — review errors!'
         }
