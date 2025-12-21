@@ -1,0 +1,217 @@
+pipeline {
+
+    agent any
+
+    tools {
+        nodejs 'nodejs-18'
+    }
+
+    environment {
+
+        SONARQUBE_SERVER = 'sonar'
+
+        NEXUS_URL       = 'http://18.189.28.205:8081'
+        NEXUS_REPO      = 'raw-releases'
+        NEXUS_ARTIFACT  = 'online-book-store'
+
+        NGINX_WEB_ROOT  = '/var/www/html'
+    }
+
+    options {
+        buildDiscarder(logRotator(numToKeepStr: '10'))
+        skipDefaultCheckout(true)
+    }
+
+    stages {
+
+        /* --- Stage 1: Source Checkout --- */
+        stage('Checkout Code') {
+            steps {
+                echo "📦 Fetching repository..."
+
+                checkout([
+                    $class: 'GitSCM',
+                    branches: [[name: '*/main']],
+                    userRemoteConfigs: [[
+                        url: 'https://github.com/uday79936/Online-book-store.git'
+                    ]]
+                ])
+
+                echo "✔ Checkout complete"
+            }
+        }
+
+        /* --- Stage 2: Install Dependencies --- */
+        stage('Install Dependencies') {
+            steps {
+                echo '📥 Installing npm dependencies...'
+
+                sh '''
+                    npm config set fund false
+                    npm ci || npm install
+                '''
+
+                echo "✔ Dependencies installed"
+            }
+        }
+
+        /* --- Stage 3: Unit Testing --- */
+        stage('Unit Tests + Coverage') {
+            steps {
+                echo '🧪 Running tests...'
+
+                sh '''
+                    npm test -- --passWithNoTests --coverage
+                '''
+
+                echo "✔ Tests completed"
+            }
+        }
+
+        /* --- Stage 4: Sonar Analysis --- */
+        stage('SonarQube Analysis') {
+            steps {
+                script {
+
+                    def sonarSources = sh(
+                        script: '[ -d "src" ] && echo src || echo .',
+                        returnStdout: true
+                    ).trim()
+
+                    echo "📂 Sonar sources: ${sonarSources}"
+
+                    withSonarQubeEnv("${SONARQUBE_SERVER}") {
+
+                        sh """
+                            if [ ! -f "coverage/lcov.info" ]; then
+                                mkdir -p coverage
+                                echo "" > coverage/lcov.info
+                            fi
+
+                            npx sonar-scanner \
+                            -Dsonar.projectKey=online-book-store \
+                            -Dsonar.projectName="online-book-store" \
+                            -Dsonar.projectVersion="0.0.${BUILD_NUMBER}" \
+                            -Dsonar.sources="${sonarSources}" \
+                            -Dsonar.javascript.lcov.reportPaths="coverage/lcov.info" \
+                            -Dsonar.sourceEncoding="UTF-8"
+                        """
+                    }
+                }
+            }
+        }
+
+        /* --- Stage 5: Build Application --- */
+        stage('Build Artifact') {
+            steps {
+                echo '⚙️ Building production app...'
+
+                sh 'npm run build'
+
+                sh '''
+                    if [ ! -d build ]; then
+                        echo "❌ build folder missing!"
+                        exit 1
+                    fi
+                '''
+
+                echo "✔ Build ready"
+            }
+        }
+
+        /* --- Stage 6: Package Artifact --- */
+        stage('Package Artifact') {
+            steps {
+                echo "📦 Creating deployment package..."
+
+                sh '''
+                    VERSION="0.0.${BUILD_NUMBER}"
+                    TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
+
+                    tar -czf "${TARBALL}" -C build .
+
+                    echo "✔ Created artifact: ${TARBALL}"
+                '''
+            }
+        }
+
+        /* --- Stage 7: Upload to Nexus --- */
+        stage('Upload Artifact to Nexus') {
+            steps {
+
+                withCredentials([
+                    usernamePassword(
+                        credentialsId: 'nexus',
+                        usernameVariable: 'NEXUS_USR',
+                        passwordVariable: 'NEXUS_PSW'
+                    )
+                ]) {
+
+                    echo "📤 Uploading tarball to Nexus..."
+
+                    sh '''
+                        VERSION="0.0.${BUILD_NUMBER}"
+                        TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
+                        FILE_PATH="${TARBALL}"
+
+                        if [ ! -f "${FILE_PATH}" ]; then
+                            echo "❌ Tarball missing!" 
+                            exit 1
+                        fi
+
+                        UPLOAD_URL="${NEXUS_URL}/repository/${NEXUS_REPO}/${TARBALL}"
+
+                        curl -v -u "${NEXUS_USR}:${NEXUS_PSW}" \
+                        --upload-file "${FILE_PATH}" "${UPLOAD_URL}"
+
+                        echo "✔ Artifact uploaded!"
+                    '''
+                }
+            }
+        }
+
+        /* --- Stage 8: Deploy to Nginx --- */
+        stage('Deploy to Nginx') {
+            steps {
+
+                echo "🚀 Deploying application to NGINX web root..."
+
+                sh '''
+                    VERSION="0.0.${BUILD_NUMBER}"
+                    TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
+                    DOWNLOAD_URL="${NEXUS_URL}/repository/${NEXUS_REPO}/${TARBALL}"
+                    WEB_ROOT="${NGINX_WEB_ROOT}"
+
+                    echo "⬇️ Downloading: ${TARBALL}"
+                    curl -f -o "/tmp/${TARBALL}" "${DOWNLOAD_URL}"
+
+                    if [ ! -f "/tmp/${TARBALL}" ]; then
+                        echo "❌ Download failed!"
+                        exit 1
+                    fi
+
+                    mkdir -p "${WEB_ROOT}"
+                    rm -rf "${WEB_ROOT:?}/"*
+
+                    echo "📦 Extracting into web root..."
+                    tar -xzf "/tmp/${TARBALL}" -C "${WEB_ROOT}"
+
+                    chmod -R 755 "${WEB_ROOT}"
+
+                    echo "✔ Deployment completed!"
+                '''
+            }
+        }
+    }
+
+    post {
+
+        success {
+            echo '🎉 Pipeline completed successfully!'
+        }
+
+        failure {
+            echo '❌ Pipeline failed — review errors!'
+        }
+    }
+}
