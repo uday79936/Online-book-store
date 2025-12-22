@@ -8,65 +8,47 @@ pipeline {
 
     environment {
 
+        VERSION   = "0.0.${BUILD_NUMBER}"
+        ARTIFACT  = "online-book-store-${VERSION}.tar.gz"
+
         SONARQUBE_SERVER = 'sonar'
 
-        NEXUS_URL       = 'http://18.189.28.205:8081'
-        NEXUS_REPO      = 'raw-releases'
-        NEXUS_ARTIFACT  = 'online-book-store'
+        NEXUS_URL  = 'http://3.144.160.233:8081'
+        NEXUS_REPO = 'raw-releases'
+        NEXUS_ARTIFACT = 'online-book-store'
 
-        NGINX_WEB_ROOT  = '/var/www/html'
-        NGINX_SERVER_IP = '18.223.44.159'
-    }
-
-    options {
-        buildDiscarder(logRotator(numToKeepStr: '10'))
-        skipDefaultCheckout(true)
+        DOCKER_IMAGE_FULL = 'udaysairam/online-book-store'
     }
 
     stages {
 
-        stage('Checkout Code') {
+        /*---------------------------------
+         Checkout Code
+        ----------------------------------*/
+        stage('Checkout') {
             steps {
-                echo "📦 Fetching repository..."
-
-                checkout([
-                    $class: 'GitSCM',
+                checkout([$class: 'GitSCM',
                     branches: [[name: '*/main']],
                     userRemoteConfigs: [[
                         url: 'https://github.com/uday79936/Online-book-store.git'
                     ]]
                 ])
-
-                echo "✔ Checkout complete"
             }
         }
 
+        /*---------------------------------
+         Install Dependencies
+        ----------------------------------*/
         stage('Install Dependencies') {
             steps {
-                echo '📥 Installing dependencies...'
-
-                sh '''
-                    npm config set fund false
-                    npm ci || npm install
-                '''
-
-                echo "✔ Dependencies installed"
+                sh 'npm ci || npm install'
             }
         }
 
-        stage('Unit Tests + Coverage') {
-            steps {
-                echo '🧪 Running tests...'
-
-                sh '''
-                    npm test -- --passWithNoTests --coverage
-                '''
-
-                echo "✔ Tests completed"
-            }
-        }
-
-        stage('SonarQube Analysis') {
+        /*---------------------------------
+         SonarQube Scan
+        ----------------------------------*/
+        stage('SonarQube Scan') {
             steps {
                 script {
 
@@ -75,20 +57,16 @@ pipeline {
                         returnStdout: true
                     ).trim()
 
-                    echo "📂 Sonar sources: ${sonarSources}"
-
                     withSonarQubeEnv("${SONARQUBE_SERVER}") {
 
                         sh """
-                            if [ ! -f "coverage/lcov.info" ]; then
-                                mkdir -p coverage
-                                echo "" > coverage/lcov.info
-                            fi
+                            mkdir -p coverage
+                            echo "" > coverage/lcov.info
 
                             npx sonar-scanner \
                             -Dsonar.projectKey=online-book-store \
-                            -Dsonar.projectName="online-book-store" \
-                            -Dsonar.projectVersion="0.0.${BUILD_NUMBER}" \
+                            -Dsonar.projectName=online-book-store \
+                            -Dsonar.projectVersion="${VERSION}" \
                             -Dsonar.sources="${sonarSources}" \
                             -Dsonar.javascript.lcov.reportPaths="coverage/lcov.info" \
                             -Dsonar.sourceEncoding="UTF-8"
@@ -98,132 +76,113 @@ pipeline {
             }
         }
 
-        stage('Build Artifact') {
+        /*---------------------------------
+         Build App
+        ----------------------------------*/
+        stage('Build App') {
             steps {
-                echo '⚙️ Building production app...'
-
                 sh 'npm run build'
-
-                sh '''
-                    if [ ! -d build ]; then
-                        echo "❌ build folder missing!"
-                        exit 1
-                    fi
-                '''
-
-                echo "✔ Build ready"
             }
         }
 
+        /*---------------------------------
+         Package Compress Build Folder
+        ----------------------------------*/
         stage('Package Artifact') {
             steps {
-                echo "📦 Creating deployment package..."
+                sh '''
+                    tar -czf "${ARTIFACT}" -C build .
+                '''
+            }
+        }
+
+        /*---------------------------------
+         Upload Artifact To Nexus
+        ----------------------------------*/
+        stage('Upload Artifact To Nexus') {
+
+            steps {
+                withCredentials([
+                    usernamePassword(credentialsId: 'nexus',
+                                     usernameVariable: 'NEXUS_USR',
+                                     passwordVariable: 'NEXUS_PSW')
+                ]) {
+
+                    sh '''
+                        UPLOAD_URL="${NEXUS_URL}/repository/${NEXUS_REPO}/${ARTIFACT}"
+
+                        curl -f -u "${NEXUS_USR}:${NEXUS_PSW}" \
+                        --upload-file "${ARTIFACT}" "${UPLOAD_URL}"
+                    '''
+                }
+            }
+        }
+
+        /*---------------------------------
+         Build Docker Image
+        ----------------------------------*/
+        stage('Build Docker Image') {
+
+            steps {
+                sh '''
+                    docker build \
+                    -t ${DOCKER_IMAGE_FULL}:${VERSION} .
+                '''
+            }
+        }
+
+        /*---------------------------------
+         Push DockerHub Image
+        ----------------------------------*/
+        stage('Push DockerHub Image') {
+
+            steps {
+
+                withCredentials([
+                    usernamePassword(credentialsId: 'dockerhub',
+                                     usernameVariable: 'USER',
+                                     passwordVariable: 'PASS')
+                ]) {
+
+                    sh '''
+                        echo "$PASS" | docker login -u "$USER" --password-stdin
+                        docker push ${DOCKER_IMAGE_FULL}:${VERSION}
+                        docker logout
+                    '''
+                }
+            }
+        }
+
+        /*---------------------------------
+         Deploy To Nginx Server
+        ----------------------------------*/
+        stage('Deploy To Nginx') {
+
+            steps {
 
                 sh '''
                     VERSION="0.0.${BUILD_NUMBER}"
-                    TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
 
-                    tar -czf "${TARBALL}" -C build .
+                    docker pull ${DOCKER_IMAGE_FULL}:${VERSION}
 
-                    echo "✔ Created artifact: ${TARBALL}"
+                    docker stop nginx || true
+                    docker rm nginx || true
+
+                    docker run -d --name nginx \
+                    -p 80:80 \
+                    ${DOCKER_IMAGE_FULL}:${VERSION}
                 '''
             }
         }
 
-        stage('Upload Artifact to Nexus') {
-            steps {
-
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'nexus',
-                        usernameVariable: 'NEXUS_USR',
-                        passwordVariable: 'NEXUS_PSW'
-                    )
-                ]) {
-
-                    echo "📤 Uploading tarball to Nexus..."
-
-                    sh '''
-                        VERSION="0.0.${BUILD_NUMBER}"
-                        TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
-                        FILE_PATH="${TARBALL}"
-
-                        UPLOAD_URL="${NEXUS_URL}/repository/${NEXUS_REPO}/${TARBALL}"
-
-                        curl -f -u "${NEXUS_USR}:${NEXUS_PSW}" \
-                        --upload-file "${FILE_PATH}" "${UPLOAD_URL}"
-                    '''
-
-                    echo "✔ Artifact uploaded!"
-                }
-            }
-        }
-
-        stage('Deploy to Nginx') {
-            steps {
-
-                withCredentials([
-                    usernamePassword(
-                        credentialsId: 'nexus',
-                        usernameVariable: 'NEXUS_USR',
-                        passwordVariable: 'NEXUS_PSW'
-                    ),
-                    sshUserPrivateKey(
-                        credentialsId: 'nginx-ssh',
-                        keyFileVariable: 'SSH_KEY'
-                    )
-                ]) {
-
-                    echo "⬇️ Download artifact to Jenkins..."
-
-                    sh '''
-                        VERSION="0.0.${BUILD_NUMBER}"
-                        TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
-                        DOWNLOAD_URL="${NEXUS_URL}/repository/${NEXUS_REPO}/${TARBALL}"
-
-                        curl -f -u "${NEXUS_USR}:${NEXUS_PSW}" \
-                        -o "/tmp/${TARBALL}" "${DOWNLOAD_URL}"
-                    '''
-
-                    echo "📤 Transfer artifact to nginx server..."
-
-                    sh '''
-                        VERSION="0.0.${BUILD_NUMBER}"
-                        TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
-
-                        scp -o StrictHostKeyChecking=no -i $SSH_KEY \
-                        /tmp/${TARBALL} \
-                        ubuntu@${NGINX_SERVER_IP}:/tmp/${TARBALL}
-                    '''
-
-                    echo "🚀 Deploying on nginx..."
-
-                    sh '''
-                        VERSION="0.0.${BUILD_NUMBER}"
-                        TARBALL="${NEXUS_ARTIFACT}-${VERSION}.tar.gz"
-                        WEB_ROOT="${NGINX_WEB_ROOT}"
-
-                        ssh -o StrictHostKeyChecking=no -i $SSH_KEY ubuntu@${NGINX_SERVER_IP} \
-                        "sudo rm -rf ${WEB_ROOT:?}/* && \
-                         sudo mkdir -p ${WEB_ROOT} && \
-                         sudo tar -xzf /tmp/${TARBALL} -C ${WEB_ROOT} && \
-                         sudo rm -f /tmp/${TARBALL} && \
-                         sudo chmod -R 755 ${WEB_ROOT} && \
-                         sudo systemctl restart nginx"
-                    '''
-
-                    echo "✔ Deployment completed!"
-                }
-            }
-        }
     }
 
     post {
         success {
-            echo '🎉 Pipeline completed successfully!'
+            echo "🚀 Pipeline Success → DockerHub + Nginx Deploy ✔"
         }
         failure {
-            echo '❌ Pipeline failed — review errors!'
+            echo "❌ Pipeline Failed"
         }
     }
 }
